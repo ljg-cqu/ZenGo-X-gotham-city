@@ -1,69 +1,151 @@
-# Key Generation Failure
+# Runbook: Key Generation Failure
 
-**Severity**: P2  
-**Last Tested**: 2025-12-05  
-**Owner**: Platform Team
+## Header
+
+| Field | Value |
+|-------|-------|
+| Severity | P1 - Critical |
+| Owner | On-call engineer |
+| Last Updated | 2025-12-06 |
+| Review Cycle | Quarterly |
+
+---
 
 ## Symptoms
 
-- Client receives HTTP 500 or connection timeout during keygen
-- Keygen latency exceeds 2000ms consistently
-- Client logs show "party1 keygen message request failed"
-- Incomplete wallet creation (missing `PrivateShare`)
+- Client receives `None` response from keygen API calls
+- HTTP 400/500 errors during key generation
+- Protocol timeout (request hangs)
+- Panic in client library (`unwrap()` failure)
+- "Protocol error" or "pdl error" messages
+
+---
 
 ## Diagnosis
 
-| Step | Command/Action | Expected Output | Evidence |
-|------|----------------|-----------------|----------|
-| 1 | Check server is running | Process active, port 8000 listening | `ps aux \| grep gotham` |
-| 2 | Check server logs | No panic/crash messages | `tail -f gotham-server.log` |
-| 3 | Test basic connectivity | HTTP 404 (no /health endpoint) | `curl http://localhost:8000/` |
-| 4 | Check DB access | RocksDB directory writable | `ls -la ./db/` |
-| 5 | Check disk space | >10% free | `df -h` |
-| 6 | Check memory | <90% used | `free -m` |
+### Step 1: Verify Server Health
 
-### Common Error Patterns
+```bash
+# Check if server is running
+curl -f http://localhost:8000/ecdsa/keygen/first -d '{}' -H "Content-Type: application/json"
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| "DB name is illegal" | Invalid `db_name` in Settings.toml | Use alphanumeric characters only |
-| Connection refused | Server not running | Start server |
-| 500 Internal Error | Crypto operation failed | Check logs for stack trace |
-| Timeout | Network or server overload | Check latency, scale if needed |
+# Expected: JSON response with session ID
+# Error: Connection refused = server down
+# Error: 500 = server error
+```
+
+### Step 2: Check Server Logs
+
+```bash
+# If running directly
+journalctl -u gotham-server -n 100
+
+# If running in Docker
+docker logs gotham-server --tail 100
+
+# Look for:
+# - Panic messages
+# - DB errors
+# - Crypto failures
+```
+
+### Step 3: Verify Database Access
+
+```bash
+# Check RocksDB directory exists and is writable
+ls -la /path/to/gotham-server/db/
+
+# Check disk space
+df -h /path/to/gotham-server/
+```
+
+### Step 4: Check Network Connectivity
+
+```bash
+# From client machine
+nc -zv server-host 8000
+
+# Check for firewall issues
+iptables -L -n | grep 8000
+```
+
+### Step 5: Identify Specific Round Failure
+
+| Round | Endpoint | Common Failures |
+|-------|----------|-----------------|
+| 1 | `/ecdsa/keygen/first` | Server startup, DB init |
+| 2 | `/ecdsa/keygen/{id}/second` | Proof verification, Paillier |
+| 3 | `/ecdsa/keygen/{id}/third` | Session not found |
+| 4 | `/ecdsa/keygen/{id}/fourth` | PDL verification |
+| CC1 | `/ecdsa/keygen/{id}/chaincode/first` | Session state |
+| CC2 | `/ecdsa/keygen/{id}/chaincode/second` | Chain code proof |
+
+---
 
 ## Resolution
 
-| Step | Action | Rollback | Evidence |
-|------|--------|----------|----------|
-| 1 | Restart server | N/A | `cd gotham-server && cargo run` |
-| 2 | Clear DB if corrupted | Restore from backup | `rm -rf ./db && restore_backup.sh` |
-| 3 | Check Settings.toml | Revert to known good | [`Settings.toml`](../../gotham-server/Settings.toml) |
-| 4 | Retry keygen from client | N/A | Client restart |
-
-### Server Restart Procedure
+### Server Not Running
 
 ```bash
-# 1. Stop existing server (if running)
-pkill -f gotham-server
+# Restart server
+cd /path/to/gotham-server
+cargo run --release
 
-# 2. Backup current DB (precaution)
-cp -r ./db ./db.backup.$(date +%Y%m%d)
-
-# 3. Start server
-cd gotham-server && cargo run --release
+# Or via systemd
+sudo systemctl restart gotham-server
 ```
+
+### Database Corruption
+
+```bash
+# Backup corrupted DB
+mv db/ db.backup.$(date +%Y%m%d)
+
+# Server will create new DB on restart
+# WARNING: Existing key shares will be lost
+```
+
+### Out of Disk Space
+
+```bash
+# Free space
+sudo apt-get clean
+docker system prune -f
+
+# Move DB to larger volume
+mv db/ /mnt/larger-volume/db
+ln -s /mnt/larger-volume/db db
+```
+
+### Session Not Found (Round 2+)
+
+- Cause: Server restarted between rounds, or wrong session ID
+- Resolution: Client must restart keygen from round 1
+
+### Proof Verification Failed
+
+- Cause: Client bug, network corruption, or attack
+- Resolution: 
+  1. Verify client library version matches server
+  2. Check for network issues (proxy, firewall)
+  3. Retry from round 1
+
+---
 
 ## Escalation
 
 | Condition | Escalate To | Contact |
-|-----------|-------------|----------|
-| Server won't start after restart | Engineering Lead | #eng-oncall |
-| Data corruption suspected | Database Admin | #db-oncall |
-| Crypto panic in logs | Security Team | #security |
+|-----------|-------------|---------|
+| Server won't start | Infrastructure team | #infra-oncall |
+| Persistent crypto failures | Security team | security@company.com |
+| Multiple users affected | Engineering lead | #eng-leads |
+
+---
 
 ## Post-Incident
 
-- [ ] Document root cause in incident report
-- [ ] Add monitoring if gap identified (e.g., keygen latency alert)
-- [ ] Update runbook if new failure mode discovered
-- [ ] Schedule retrospective if P1 impact
+1. [ ] Document root cause
+2. [ ] Update monitoring if detection was delayed
+3. [ ] Consider adding retry logic if applicable
+4. [ ] Review affected sessions for data integrity
+5. [ ] Communicate resolution to affected users

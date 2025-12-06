@@ -1,107 +1,165 @@
-# Bitcoin Wallet [IMPORTANT]
+# Bitcoin Wallet Component [P2]
 
-**Location**: [`demo-wallet/src/bitcoin/mod.rs`](../demo-wallet/src/bitcoin/mod.rs)
+**Location**: [`demo-wallet/src/bitcoin/`](../../demo-wallet/src/bitcoin/)  
+**Priority**: P2 — Demonstration of 2P-ECDSA integration with Bitcoin network  
+**Purpose**: CLI wallet implementation for Bitcoin using gotham-client and Electrum API  
+**Design**: SegWit P2WPKH addresses with Electrum backend — chosen for modern Bitcoin compatibility and lightweight indexing  
+**Limitations**: Demo-quality code; Electrum dependency for UTXO queries; single-address wallet (non-HD address rotation)
 
-**Priority**: IMPORTANT — Demonstrates practical Bitcoin integration; reference implementation for wallet developers
+## Overview
 
-**Purpose**: Full Bitcoin wallet implementation using 2P-ECDSA for transaction signing. Supports P2WPKH (SegWit) addresses, UTXO selection, and Electrum server integration.
-
-**Design**: HD wallet with greedy UTXO selection
-- Rationale: Follows BIP32/BIP84 standards for compatibility with standard wallet recovery
-- Alternative considered: Full node integration (rejected for deployment complexity)
-
-**Limitations**:
-- NOT recommended for high-value transactions without fee estimation improvements
-- NOT suitable for privacy-focused use cases (no coin control, no CoinJoin)
-
-## Wallet Structure
-
-```rust
-pub struct BitcoinWallet {
-    pub id: String,
-    pub network: String,                                    // "bitcoin" | "testnet"
-    pub private_share: PrivateShare,                       // 2P key share
-    pub last_derived_pos: u32,                             // HD derivation index
-    pub addresses_derivation_map: HashMap<String, AddressDerivation>,
-}
-```
-
-Evidence: [`bitcoin/mod.rs:114-120`](../demo-wallet/src/bitcoin/mod.rs#L114-L120)
-
-## Methods
-
-| Method | Signature | Purpose | Evidence |
-|--------|-----------|---------|----------|
-| `BitcoinWallet::new` | `(&ClientShim<C>, &str) -> Self` | Creates new wallet with 2P keygen | [`mod.rs:123-136`](../demo-wallet/src/bitcoin/mod.rs#L123-L136) |
-| `send` | `(&mut self, &String, f32, &ClientShim<C>, &mut dyn Electrumx) -> String` | Sends BTC transaction | [`mod.rs:263-374`](../demo-wallet/src/bitcoin/mod.rs#L263-L374) |
-| `get_new_bitcoin_address` | `(&mut self) -> Address` | Derives new P2WPKH address | [`mod.rs:376-391`](../demo-wallet/src/bitcoin/mod.rs#L376-L391) |
-| `get_balance` | `(&mut self, &mut dyn Electrumx) -> GetWalletBalanceResponse` | Queries total balance | [`mod.rs:403-415`](../demo-wallet/src/bitcoin/mod.rs#L403-L415) |
-| `backup` | `(&self, Escrow, &str)` | Creates encrypted backup | [`mod.rs:143-167`](../demo-wallet/src/bitcoin/mod.rs#L143-L167) |
-| `save_to` / `load_from` | File operations | Wallet persistence | [`mod.rs:245-261`](../demo-wallet/src/bitcoin/mod.rs#L245-L261) |
-
-## Transaction Flow
+The Bitcoin wallet demonstrates practical integration of 2P-ECDSA with the Bitcoin network. It supports wallet creation, balance queries, and transaction signing/broadcasting via Electrum servers.
 
 ```mermaid
-sequenceDiagram
-    participant W as Wallet
-    participant E as Electrumx
-    participant G as Gotham Server
-    participant B as Bitcoin Network
-    
-    W->>E: Query UTXOs
-    E-->>W: List of unspent outputs
-    W->>W: Select UTXOs (greedy)
-    W->>W: Build transaction
-    loop For each input
-        W->>G: Sign input
-        G-->>W: Signature (r, s)
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#f8f9fa", "primaryTextColor": "#1a1a1a", "primaryBorderColor": "#7a8591", "lineColor": "#8897a8", "secondaryColor": "#eff6fb", "tertiaryColor": "#f3f5f7"}}}%%
+flowchart LR
+    subgraph CLI["CLI Commands"]
+        CREATE[create]
+        BALANCE[balance]
+        SEND[send]
+        BACKUP[backup]
     end
-    W->>W: Assemble signed tx
-    W->>E: Broadcast transaction
-    E->>B: Submit to mempool
+    subgraph Wallet["Wallet Logic"]
+        KEYGEN[2P Keygen]
+        SIGN[2P Sign]
+        TX[Transaction Builder]
+    end
+    subgraph External["External Services"]
+        GOTHAM[Gotham Server]
+        ELECTRUM[Electrum Server]
+        BTC[Bitcoin Network]
+    end
+    
+    CREATE --> KEYGEN --> GOTHAM
+    BALANCE --> ELECTRUM
+    SEND --> TX --> SIGN --> GOTHAM
+    SEND --> ELECTRUM
+    ELECTRUM --> BTC
+    
+    classDef default fill:#f8f9fa,stroke:#7a8591,stroke-width:2px,color:#1a1a1a
 ```
-
-## Transaction Signing Process
-
-| Step | Action | Evidence |
-|------|--------|----------|
-| 1 | Select UTXOs using greedy algorithm | [`mod.rs:418-447`](../demo-wallet/src/bitcoin/mod.rs#L418-L447) |
-| 2 | Build transaction with inputs/outputs | [`mod.rs:278-320`](../demo-wallet/src/bitcoin/mod.rs#L278-L320) |
-| 3 | For each input, compute sighash (BIP143) | [`mod.rs:336-343`](../demo-wallet/src/bitcoin/mod.rs#L336-L343) |
-| 4 | Sign sighash using 2P-ECDSA | [`mod.rs:344-352`](../demo-wallet/src/bitcoin/mod.rs#L344-L352) |
-| 5 | Serialize signature to DER format | [`mod.rs:354-362`](../demo-wallet/src/bitcoin/mod.rs#L354-L362) |
-| 6 | Attach witness data to input | [`mod.rs:363-367`](../demo-wallet/src/bitcoin/mod.rs#L363-L367) |
-| 7 | Broadcast via Electrum | [`mod.rs:370-373`](../demo-wallet/src/bitcoin/mod.rs#L370-L373) |
-
-## Address Derivation
-
-Uses BIP32-style derivation path `m/0/{pos}`:
-
-```rust
-fn derive_new_key(private_share: &PrivateShare, pos: u32) -> (u32, MasterKey2) {
-    let last_pos: u32 = pos + 1;
-    let last_child_master_key = private_share
-        .master_key
-        .get_child(vec![BigInt::from(0), BigInt::from(last_pos)]);
-    (last_pos, last_child_master_key)
-}
-```
-
-Evidence: [`mod.rs:522-530`](../demo-wallet/src/bitcoin/mod.rs#L522-L530)
-
-## Backup & Recovery
-
-| Feature | Implementation | Evidence |
-|---------|----------------|----------|
-| Backup | Centipede verifiable encryption to escrow public key | [`mod.rs:143-167`](../demo-wallet/src/bitcoin/mod.rs#L143-L167) |
-| Verify | Zero-knowledge proof verification | [`mod.rs:169-192`](../demo-wallet/src/bitcoin/mod.rs#L169-L192) |
-| Recovery | Decrypt segments with escrow private key (commented out) | [`mod.rs:196-243`](../demo-wallet/src/bitcoin/mod.rs#L196-L243) |
 
 ## CLI Commands
 
-| Command | Description | Evidence |
-|---------|-------------|----------|
-| `bitcoin create` | Create new wallet | [`commands.rs`](../demo-wallet/src/bitcoin/commands.rs) |
-| `bitcoin address` | Generate new address | [`commands.rs`](../demo-wallet/src/bitcoin/commands.rs) |
-| `bitcoin balance` | Query wallet balance | [`commands.rs`](../demo-wallet/src/bitcoin/commands.rs) |
-| `bitcoin send` | Send BTC | [`commands.rs`](../demo-wallet/src/bitcoin/commands.rs) |
+| Command | Purpose | Evidence |
+|---------|---------|----------|
+| `bitcoin create` | Generate new 2P-ECDSA wallet | [`main.rs:76`](../../demo-wallet/src/main.rs#L76) |
+| `bitcoin balance` | Query wallet balance via Electrum | CLI implementation |
+| `bitcoin send` | Sign and broadcast Bitcoin transaction | CLI implementation |
+| `bitcoin backup` | Create encrypted key backup | CLI implementation |
+
+## Configuration
+
+Settings from `settings.toml` or environment:
+
+| Setting | Purpose | Default | Evidence |
+|---------|---------|---------|----------|
+| `electrum_server_url` | Electrum server endpoint | Required | [`main.rs:51`](../../demo-wallet/src/main.rs#L51) |
+| `wallet_file` | Path to wallet JSON | `wallet.json` | [`main.rs:70-72`](../../demo-wallet/src/main.rs#L70-L72) |
+| `gotham_server_url` | Gotham server endpoint | `http://127.0.0.1:8000` | [`main.rs:66-68`](../../demo-wallet/src/main.rs#L66-L68) |
+
+## Transaction Flow
+
+### Signing Process
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#f8f9fa", "primaryTextColor": "#1a1a1a", "primaryBorderColor": "#7a8591", "lineColor": "#8897a8", "secondaryColor": "#eff6fb", "tertiaryColor": "#f3f5f7"}}}%%
+flowchart TD
+    A[Query UTXOs] --> B[Select Inputs]
+    B --> C[Build Transaction]
+    C --> D{For Each Input}
+    D --> E[Compute BIP143 SigHash]
+    E --> F[2P-ECDSA Sign]
+    F --> G[Build Witness]
+    G --> D
+    D -->|Done| H[Serialize Transaction]
+    H --> I[Broadcast via Electrum]
+    
+    classDef default fill:#f8f9fa,stroke:#7a8591,stroke-width:2px,color:#1a1a1a
+```
+
+### Transaction Building
+
+| Stage | Input | Transform | Output |
+|-------|-------|-----------|--------|
+| UTXO Query | Wallet addresses | Electrum `listunspent` | UTXO list with values |
+| Selection | Amount, UTXOs | Greedy selection | Selected inputs |
+| Build | UTXOs, recipient, change | BIP143 structure | Unsigned transaction |
+| Sign | SigHash, master_key | 2P-ECDSA protocol | Witness data |
+| Broadcast | Signed transaction | Electrum `broadcast` | TXID |
+
+## Address Format
+
+Uses **P2WPKH** (Pay-to-Witness-Public-Key-Hash) SegWit addresses:
+
+- Prefix: `bc1` (mainnet) or `tb1` (testnet)
+- Lower fees than legacy addresses
+- BIP143 signature hash algorithm
+
+## Key Derivation
+
+BIP32-style hierarchical derivation:
+
+```rust
+// Derive child key for address index
+let mk_child = master_key.get_child(vec![x_pos, y_pos]);
+```
+
+Where:
+- `x_pos`: Account index (typically 0)
+- `y_pos`: Address index
+
+## Wallet Storage
+
+Wallet data is stored as JSON:
+
+```rust
+struct Wallet {
+    id: String,              // Session ID from keygen
+    master_key: MasterKey2,  // Client's key share
+    addresses: Vec<Address>, // Derived addresses
+}
+```
+
+Storage location: `wallet_file` setting (default: `wallet.json`)
+
+## Electrum Integration
+
+The wallet uses Electrum protocol for:
+
+| Operation | Electrum Method | Purpose |
+|-----------|-----------------|---------|
+| Balance query | `blockchain.scripthash.get_balance` | Get confirmed/unconfirmed balance |
+| UTXO listing | `blockchain.scripthash.listunspent` | Get spendable outputs |
+| Transaction broadcast | `blockchain.transaction.broadcast` | Submit signed transaction |
+| Fee estimation | `blockchain.estimatefee` | Get fee rate |
+
+## Key Backup (Centipede)
+
+Encrypted backup using verifiable encryption:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Segment Size | 8 | Encryption granularity |
+| Num Segments | 32 | Backup redundancy |
+
+Evidence: Referenced in wiki-0 as `bitcoin/escrow.rs`
+
+## Error Handling
+
+| Error Type | Handling | Recovery |
+|------------|----------|----------|
+| Electrum connection | Return error | Retry or use different server |
+| Insufficient funds | Return error | Add more UTXOs |
+| Signing failure | Return error | Check server availability |
+| Broadcast failure | Return error | Check transaction validity |
+
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `gotham-client` | 2P-ECDSA key/sign operations |
+| `bitcoin` | Transaction structures, hashing |
+| `electrum-client` | Electrum protocol client |
+| `clap` | CLI argument parsing |
+| `serde_json` | Wallet file serialization |

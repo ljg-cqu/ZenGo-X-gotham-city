@@ -1,137 +1,181 @@
-# Ethereum Wallet [IMPORTANT]
+# Ethereum Wallet Component [P2]
 
-**Location**: [`demo-wallet/src/ethereum/mod.rs`](../demo-wallet/src/ethereum/mod.rs)
+**Location**: [`demo-wallet/src/ethereum/`](../../demo-wallet/src/ethereum/)  
+**Priority**: P2 — Demonstration of 2P-ECDSA integration with EVM-compatible networks  
+**Purpose**: CLI wallet implementation for Ethereum using gotham-client and JSON-RPC API  
+**Design**: EIP-155 replay-protected signatures with standard JSON-RPC backend  
+**Limitations**: Demo-quality code; basic ETH transfers only; no ERC-20/smart contract support
 
-**Priority**: IMPORTANT — Demonstrates EVM chain integration; reference for DeFi and ERC-20 applications
+## Overview
 
-**Purpose**: Ethereum wallet implementation using 2P-ECDSA with ethers-rs integration. Supports native ETH transfers, ERC-20 token transfers, and EIP-155/EIP-712 signing.
-
-**Design**: ethers-rs `Signer` trait implementation
-- Rationale: Leverages mature ethers-rs ecosystem for transaction construction and RPC
-- Alternative considered: web3.js (rejected for Rust-native tooling preference)
-
-**Limitations**:
-- NOT recommended for MEV-sensitive transactions (no private mempool support)
-- NOT suitable for gas-intensive operations without gas estimation tuning
-
-## Wallet Structure
-
-```rust
-pub struct GothamWallet {
-    pub private_share: PrivateShare,  // 2P key share
-    pub hd_path: Vec<u32>,            // Derivation path [x, y]
-    pub chain_id: u64,                // EIP-155 chain ID
-    pub address: Address,             // Derived Ethereum address
-}
-```
-
-Evidence: [`ethereum/mod.rs:21-34`](../demo-wallet/src/ethereum/mod.rs#L21-L34)
-
-## Methods
-
-| Method | Signature | Purpose | Evidence |
-|--------|-----------|---------|----------|
-| `GothamWallet::new` | `(&ClientShim<C>, Vec<u32>, u64) -> Self` | Creates wallet with 2P keygen | [`mod.rs:37-67`](../demo-wallet/src/ethereum/mod.rs#L37-L67) |
-| `GothamSigner::sign_hash` | `(&self, H256) -> Result<Signature>` | Signs arbitrary hash | [`mod.rs:103-135`](../demo-wallet/src/ethereum/mod.rs#L103-L135) |
-| `sign_transaction` | `async fn(&TypedTransaction) -> Result<Signature>` | Signs EIP-155 transaction | [`mod.rs:155-179`](../demo-wallet/src/ethereum/mod.rs#L155-L179) |
-| `sign_typed_data` | `async fn(&T: Eip712) -> Result<Signature>` | Signs EIP-712 typed data | [`mod.rs:181-189`](../demo-wallet/src/ethereum/mod.rs#L181-L189) |
-| `transfer_erc20` | `async fn(...)` | Transfers ERC-20 tokens | [`mod.rs:231-269`](../demo-wallet/src/ethereum/mod.rs#L231-L269) |
-| `send_transaction` | `async fn(...)` | Sends native ETH | [`mod.rs:279-312`](../demo-wallet/src/ethereum/mod.rs#L279-L312) |
-
-## Address Derivation
-
-Ethereum address is derived from the public key:
-
-```rust
-// Uncompressed public key (65 bytes, starts with 0x04)
-let pk = pk.serialize_uncompressed();
-
-// Keccak256 of public key bytes (excluding 0x04 prefix)
-let hash = H256(keccak256(&pk[1..]));
-
-// Last 20 bytes = Ethereum address
-let address = Address::from_slice(&hash[12..]);
-```
-
-Evidence: [`mod.rs:53-59`](../demo-wallet/src/ethereum/mod.rs#L53-L59)
-
-## Signer Implementation
-
-Implements ethers-rs `Signer` trait for seamless integration:
+The Ethereum wallet demonstrates practical integration of 2P-ECDSA with EVM-compatible networks (Ethereum, Polygon, BSC, etc.). It supports wallet creation, balance queries, and transaction signing/broadcasting via JSON-RPC.
 
 ```mermaid
-classDiagram
-    class Signer {
-        <<trait>>
-        +sign_message()
-        +sign_transaction()
-        +sign_typed_data()
-        +address()
-        +chain_id()
-    }
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#f8f9fa", "primaryTextColor": "#1a1a1a", "primaryBorderColor": "#7a8591", "lineColor": "#8897a8", "secondaryColor": "#eff6fb", "tertiaryColor": "#f3f5f7"}}}%%
+flowchart LR
+    subgraph CLI["CLI Commands"]
+        CREATE[create]
+        BALANCE[balance]
+        SEND[send]
+    end
+    subgraph Wallet["Wallet Logic"]
+        KEYGEN[2P Keygen]
+        SIGN[2P Sign]
+        TX[Transaction Builder]
+    end
+    subgraph External["External Services"]
+        GOTHAM[Gotham Server]
+        RPC[Ethereum RPC]
+        ETH[Ethereum Network]
+    end
     
-    class GothamSigner {
-        +gotham_client_shim
-        +wallet: GothamWallet
-        +sign_hash()
-    }
+    CREATE --> KEYGEN --> GOTHAM
+    BALANCE --> RPC
+    SEND --> TX --> SIGN --> GOTHAM
+    SEND --> RPC
+    RPC --> ETH
     
-    Signer <|.. GothamSigner
+    classDef default fill:#f8f9fa,stroke:#7a8591,stroke-width:2px,color:#1a1a1a
 ```
-
-Evidence: [`mod.rs:142-203`](../demo-wallet/src/ethereum/mod.rs#L142-L203)
-
-## Transaction Signing Process
-
-| Step | Action | Evidence |
-|------|--------|----------|
-| 1 | Set chain_id if not present | [`mod.rs:156-159`](../demo-wallet/src/ethereum/mod.rs#L156-L159) |
-| 2 | Compute sighash (RLP encoded tx) | [`mod.rs:170`](../demo-wallet/src/ethereum/mod.rs#L170) |
-| 3 | Sign hash using 2P-ECDSA | [`mod.rs:172`](../demo-wallet/src/ethereum/mod.rs#L172) |
-| 4 | Apply EIP-155 v value transformation | [`mod.rs:176`](../demo-wallet/src/ethereum/mod.rs#L176) |
-
-### EIP-155 v Calculation
-
-```rust
-signature.v = (chain_id * 2 + 35) + signature.v;
-```
-
-Evidence: [`mod.rs:176`](../demo-wallet/src/ethereum/mod.rs#L176)
-
-## ERC-20 Support
-
-Built-in ERC-20 ABI binding using ethers `abigen!`:
-
-```rust
-abigen!(
-    ERC20Contract,
-    r#"[
-        function name() public view returns (string)
-        function symbol() public view returns (string)
-        function decimals() public view returns (uint8)
-        function balanceOf(address _owner) public view returns (uint256 balance)
-        function transfer(address _to, uint256 _value) public returns (bool success)
-        ...
-    ]"#,
-);
-```
-
-Evidence: [`mod.rs:205-220`](../demo-wallet/src/ethereum/mod.rs#L205-L220)
 
 ## CLI Commands
 
-| Command | Description | Evidence |
-|---------|-------------|----------|
-| `evm create` | Create new wallet | [`commands.rs`](../demo-wallet/src/ethereum/commands.rs) |
-| `evm address` | Show wallet address | [`commands.rs`](../demo-wallet/src/ethereum/commands.rs) |
-| `evm balance` | Query ETH/ERC-20 balance | [`commands.rs`](../demo-wallet/src/ethereum/commands.rs) |
-| `evm send` | Send native ETH | [`commands.rs`](../demo-wallet/src/ethereum/commands.rs) |
-| `evm transfer` | Transfer ERC-20 tokens | [`commands.rs`](../demo-wallet/src/ethereum/commands.rs) |
+| Command | Purpose | Evidence |
+|---------|---------|----------|
+| `evm create` | Generate new 2P-ECDSA wallet | [`main.rs:75`](../../demo-wallet/src/main.rs#L75) |
+| `evm balance` | Query ETH balance via RPC | CLI implementation |
+| `evm send` | Sign and broadcast ETH transaction | CLI implementation |
 
 ## Configuration
 
-| Option | Type | Description | Evidence |
-|--------|------|-------------|----------|
-| `rpc_url` | String | Ethereum RPC endpoint | [`main.rs:45`](../demo-wallet/src/main.rs#L45) |
-| `chain_id` | u64 | EIP-155 chain ID | [`main.rs:49`](../demo-wallet/src/main.rs#L49) |
-| `wallet_file` | String | Wallet JSON path | [`main.rs:44`](../demo-wallet/src/main.rs#L44) |
+Settings from `settings.toml` or environment (prefixed with `GOTHAM_`):
+
+| Setting | Purpose | Default | Evidence |
+|---------|---------|---------|----------|
+| `rpc_url` | Ethereum JSON-RPC endpoint | Required | [`main.rs:45`](../../demo-wallet/src/main.rs#L45) |
+| `wallet_file` | Path to wallet JSON | `wallet.json` | [`main.rs:70-72`](../../demo-wallet/src/main.rs#L70-L72) |
+| `gotham_server_url` | Gotham server endpoint | `http://127.0.0.1:8000` | [`main.rs:66-68`](../../demo-wallet/src/main.rs#L66-L68) |
+| `chain_id` | EIP-155 chain ID | Required for signing | [`main.rs:49`](../../demo-wallet/src/main.rs#L49) |
+
+## Transaction Flow
+
+### Signing Process
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#f8f9fa", "primaryTextColor": "#1a1a1a", "primaryBorderColor": "#7a8591", "lineColor": "#8897a8", "secondaryColor": "#eff6fb", "tertiaryColor": "#f3f5f7"}}}%%
+flowchart TD
+    A[Query Nonce] --> B[Query Gas Price]
+    B --> C[Build Transaction]
+    C --> D[Compute EIP-155 Hash]
+    D --> E[2P-ECDSA Sign]
+    E --> F[Apply Recovery ID]
+    F --> G[RLP Encode]
+    G --> H[Broadcast via RPC]
+    
+    classDef default fill:#f8f9fa,stroke:#7a8591,stroke-width:2px,color:#1a1a1a
+```
+
+### Transaction Building
+
+| Stage | Input | Transform | Output |
+|-------|-------|-----------|--------|
+| Nonce Query | Sender address | `eth_getTransactionCount` | Account nonce |
+| Gas Estimation | Transaction | `eth_estimateGas` or fixed | Gas limit |
+| Gas Price | Network state | `eth_gasPrice` | Gas price in wei |
+| Build | Nonce, gas, to, value | EIP-155 format | Unsigned transaction |
+| Hash | Unsigned tx, chain_id | Keccak256 with v=chain_id | Signing hash |
+| Sign | Hash, master_key | 2P-ECDSA protocol | (r, s, recid) |
+| Encode | Signed tx | RLP encoding | Raw transaction bytes |
+| Broadcast | Raw tx hex | `eth_sendRawTransaction` | Transaction hash |
+
+## EIP-155 Signature
+
+Replay protection via chain ID encoding:
+
+```
+v = chain_id * 2 + 35 + recovery_id
+```
+
+| Chain | Chain ID | v Values |
+|-------|----------|----------|
+| Ethereum Mainnet | 1 | 37, 38 |
+| Sepolia Testnet | 11155111 | 22310257, 22310258 |
+| Polygon | 137 | 309, 310 |
+
+## Address Derivation
+
+Ethereum addresses are derived from the public key:
+
+```
+address = keccak256(public_key)[12..32]
+```
+
+The public key is extracted from the shared `MasterKey2` after key generation.
+
+## Key Derivation
+
+BIP32-style hierarchical derivation (same as Bitcoin):
+
+```rust
+let mk_child = master_key.get_child(vec![x_pos, y_pos]);
+```
+
+Standard derivation path: `m/44'/60'/0'/0/{index}` semantics
+
+## Wallet Storage
+
+Wallet data is stored as JSON (same format as Bitcoin):
+
+```rust
+struct Wallet {
+    id: String,              // Session ID from keygen
+    master_key: MasterKey2,  // Client's key share
+    address: String,         // Derived Ethereum address
+}
+```
+
+## JSON-RPC Methods
+
+| Method | Purpose |
+|--------|---------|
+| `eth_getBalance` | Query ETH balance |
+| `eth_getTransactionCount` | Get account nonce |
+| `eth_gasPrice` | Current gas price |
+| `eth_estimateGas` | Estimate gas for transaction |
+| `eth_sendRawTransaction` | Broadcast signed transaction |
+| `eth_getTransactionReceipt` | Check transaction status |
+
+## Error Handling
+
+| Error Type | Handling | Recovery |
+|------------|----------|----------|
+| RPC connection | Return error | Use different endpoint |
+| Insufficient balance | Return error | Add funds |
+| Nonce too low | Return error | Query fresh nonce |
+| Gas estimation failed | Return error | Increase gas limit |
+| Signing failure | Return error | Check server |
+
+## Multi-Chain Support
+
+The wallet supports any EVM-compatible chain by configuring:
+
+1. `rpc_url`: Chain's RPC endpoint
+2. `chain_id`: EIP-155 chain identifier
+
+| Network | RPC Example | Chain ID |
+|---------|-------------|----------|
+| Ethereum | `https://eth.llamarpc.com` | 1 |
+| Polygon | `https://polygon-rpc.com` | 137 |
+| Arbitrum | `https://arb1.arbitrum.io/rpc` | 42161 |
+| Sepolia | `https://rpc.sepolia.org` | 11155111 |
+
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `gotham-client` | 2P-ECDSA key/sign operations |
+| `web3` or `ethers` | Ethereum transaction types |
+| `rlp` | RLP encoding for transactions |
+| `keccak-hash` | Address derivation, tx hashing |
+| `clap` | CLI argument parsing |
+| `serde_json` | Wallet file serialization |

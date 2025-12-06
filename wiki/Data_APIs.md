@@ -2,232 +2,263 @@
 
 ## Data Model
 
+### Entity Relationships
+
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#f8f9fa", "primaryTextColor": "#1a1a1a", "primaryBorderColor": "#7a8591", "lineColor": "#8897a8", "secondaryColor": "#eff6fb", "tertiaryColor": "#f3f5f7"}}}%%
 erDiagram
-    PrivateShare ||--|| MasterKey2 : contains
-    MasterKey2 ||--|| Party2Public : has
-    MasterKey2 ||--|| Party2Private : has
-    MasterKey2 ||--|| Paillier : uses
-    BitcoinWallet ||--|| PrivateShare : holds
-    BitcoinWallet ||--o{ AddressDerivation : derives
-    GothamWallet ||--|| PrivateShare : holds
-    
-    PrivateShare {
-        String id PK
-        MasterKey2 master_key
+    SESSION ||--o{ KEY_SHARE : contains
+    SESSION {
+        string id PK "UUID v4 session identifier"
+        string customer_id "Customer/user identifier"
+        timestamp created_at "Session creation time"
     }
-    
-    MasterKey2 {
-        Party2Public public
-        Party2Private private
-        String chain_code
+    KEY_SHARE {
+        string identifier PK "customer_id_session_id_table"
+        json value "Serialized MPC state"
+        string table_name "MPC struct type name"
     }
-    
-    BitcoinWallet {
-        String id PK
-        String network
-        u32 last_derived_pos
+    PRIVATE_SHARE ||--|| MASTER_KEY : contains
+    PRIVATE_SHARE {
+        string id "Session ID reference"
+        json master_key "Client MasterKey2 share"
     }
-    
-    AddressDerivation {
-        u32 pos
-        MasterKey2 mk
+    MASTER_KEY {
+        json public_key "Shared ECDSA public key"
+        json chain_code "BIP32 chain code"
+        json party2_private "Party2 private share"
+        json paillier_public "Paillier public key"
     }
-    
-    GothamWallet {
-        u64 chain_id
-        Address address
-        Vec_u32 hd_path
+    WALLET ||--|| PRIVATE_SHARE : uses
+    WALLET {
+        string id "Session ID"
+        json addresses "Derived addresses array"
+        string network "bitcoin or ethereum"
     }
 ```
 
-| Entity | Purpose | Key Attributes | Evidence |
-|--------|---------|----------------|----------|
-| PrivateShare | Client's 2P key share | id, master_key | [`gotham-client/src/ecdsa/types.rs`](../gotham-client/src/ecdsa/types.rs) |
-| MasterKey2 | Client's master key with HD support | public, private, chain_code | `two-party-ecdsa` crate |
-| BitcoinWallet | Bitcoin wallet state | id, network, addresses_derivation_map | [`demo-wallet/src/bitcoin/mod.rs:114-120`](../demo-wallet/src/bitcoin/mod.rs#L114-L120) |
-| GothamWallet | Ethereum wallet state | private_share, hd_path, chain_id, address | [`demo-wallet/src/ethereum/mod.rs:21-34`](../demo-wallet/src/ethereum/mod.rs#L21-L34) |
-| AddressDerivation | Derived address metadata | pos, mk | [`demo-wallet/src/bitcoin/mod.rs:108-111`](../demo-wallet/src/bitcoin/mod.rs#L108-L111) |
+### Entity Descriptions
+
+| Priority | Entity | Purpose | Storage | Evidence |
+|----------|--------|---------|---------|----------|
+| P1 | **Session** | Identifies a keygen/sign session | Server RocksDB | [`public_gotham.rs:52-54`](../gotham-server/src/public_gotham.rs#L52-L54) |
+| P1 | **KeyShare** | Server-side MPC state (Party1) | Server RocksDB | [`public_gotham.rs:58-68`](../gotham-server/src/public_gotham.rs#L58-L68) |
+| P1 | **PrivateShare** | Client-side key share (Party2) | Client JSON file | [`ecdsa/types.rs`](../gotham-client/src/ecdsa/types.rs) |
+| P1 | **MasterKey2** | Complete client key material | In PrivateShare | [`keygen.rs:108-120`](../gotham-client/src/ecdsa/keygen.rs#L108-L120) |
+| P2 | **Wallet** | Application-level wallet state | Client JSON file | [`demo-wallet/`](../demo-wallet/) |
+
+### Key Indexing Schema
+
+Server key shares are stored with composite keys:
+
+```
+{customer_id}_{session_id}_{table_name}
+```
+
+| Component | Source | Example |
+|-----------|--------|---------|
+| `customer_id` | Request header or default | `user123` |
+| `session_id` | Generated UUID v4 | `550e8400-e29b-41d4-a716-446655440000` |
+| `table_name` | MPC protocol step | `kg_party_one_first_message` |
+
+Evidence: [`public_gotham.rs:52-54`](../gotham-server/src/public_gotham.rs#L52-L54)
+
+### Table Names (MPC States)
+
+| Table Name | Protocol Phase | Content |
+|------------|----------------|---------|
+| `kg_party_one_first_message` | Keygen Round 1 | Party1 commitment |
+| `kg_party_one_second_message` | Keygen Round 2 | ECDH + Paillier keys |
+| `kg_party_one_third_message` | Keygen Round 3 | PDL first message |
+| `kg_party_one_fourth_message` | Keygen Round 4 | PDL second message |
+| `cc_party_one_first_message` | Chain Code Round 1 | Chain code commitment |
+| `cc_party_one_second_message` | Chain Code Round 2 | Chain code reveal |
+| `sign_party_one_first_message` | Sign Round 1 | Ephemeral key |
 
 ---
 
 ## API Contract
 
-### Key Generation Endpoints
+### Base URL
 
-| Priority | Method | Endpoint | Request | Response | Auth | Errors | Evidence |
-|----------|--------|----------|---------|----------|------|--------|----------|
-| CRITICAL | POST | `/ecdsa/keygen/first` | `{}` | `(String, KeyGenFirstMsg)` | None | 500 | [`server.rs:28`](../gotham-server/src/server.rs#L28) |
-| CRITICAL | POST | `/ecdsa/keygen/{id}/second` | `DLogProof` | `KeyGenParty1Message2` | None | 400, 500 | [`server.rs:29`](../gotham-server/src/server.rs#L29) |
-| CRITICAL | POST | `/ecdsa/keygen/{id}/third` | `PDLFirstMessage` | `PDLFirstMessage` | None | 400, 500 | [`server.rs:30`](../gotham-server/src/server.rs#L30) |
-| CRITICAL | POST | `/ecdsa/keygen/{id}/fourth` | `PDLSecondMessage` | `PDLSecondMessage` | None | 400, 500 | [`server.rs:31`](../gotham-server/src/server.rs#L31) |
-| CRITICAL | POST | `/ecdsa/keygen/{id}/chaincode/first` | `{}` | `Party1FirstMessage` | None | 500 | [`server.rs:32`](../gotham-server/src/server.rs#L32) |
-| CRITICAL | POST | `/ecdsa/keygen/{id}/chaincode/second` | `DLogProof` | `Party1SecondMessage` | None | 400, 500 | [`server.rs:33`](../gotham-server/src/server.rs#L33) |
+```
+http://{host}:8000
+```
 
-### Signing Endpoints
+Default: `http://127.0.0.1:8000`
 
-| Priority | Method | Endpoint | Request | Response | Auth | Errors | Evidence |
-|----------|--------|----------|---------|----------|------|--------|----------|
-| CRITICAL | POST | `/ecdsa/sign/{id}/first` | `EphKeyGenFirstMsg` | `EphKeyGenFirstMsg` | None | 400, 500 | [`server.rs:34`](../gotham-server/src/server.rs#L34) |
-| CRITICAL | POST | `/ecdsa/sign/{id}/second` | `SignSecondMsgRequest` | `SignatureRecid` | None | 400, 500 | [`server.rs:35`](../gotham-server/src/server.rs#L35) |
+### Authentication
 
----
+| Header | Value | Required | Evidence |
+|--------|-------|----------|----------|
+| `Authorization` | `Bearer {token}` | Optional | [`lib.rs:90-92`](../gotham-client/src/lib.rs#L90-L92) |
 
-## Request/Response Schemas
+**Note**: Authorization is checked via `Db::granted()` which returns `true` by default. Production deployments must implement proper validation.
 
-### Key Generation First Message Response
+### Endpoints
 
+#### Key Generation
+
+| Priority | Method | Endpoint | Purpose | Evidence |
+|----------|--------|----------|---------|----------|
+| P1 | POST | `/ecdsa/keygen/first` | Initialize keygen session | [`server.rs:28`](../gotham-server/src/server.rs#L28) |
+| P1 | POST | `/ecdsa/keygen/{id}/second` | ECDH + Paillier exchange | [`server.rs:29`](../gotham-server/src/server.rs#L29) |
+| P1 | POST | `/ecdsa/keygen/{id}/third` | PDL challenge | [`server.rs:30`](../gotham-server/src/server.rs#L30) |
+| P1 | POST | `/ecdsa/keygen/{id}/fourth` | PDL verification | [`server.rs:31`](../gotham-server/src/server.rs#L31) |
+| P1 | POST | `/ecdsa/keygen/{id}/chaincode/first` | Chain code round 1 | [`server.rs:32`](../gotham-server/src/server.rs#L32) |
+| P1 | POST | `/ecdsa/keygen/{id}/chaincode/second` | Chain code round 2 | [`server.rs:33`](../gotham-server/src/server.rs#L33) |
+
+#### Signing
+
+| Priority | Method | Endpoint | Purpose | Evidence |
+|----------|--------|----------|---------|----------|
+| P1 | POST | `/ecdsa/sign/{id}/first` | Ephemeral key exchange | [`server.rs:34`](../gotham-server/src/server.rs#L34) |
+| P1 | POST | `/ecdsa/sign/{id}/second` | Signature completion | [`server.rs:35`](../gotham-server/src/server.rs#L35) |
+
+### Request/Response Schemas
+
+#### POST /ecdsa/keygen/first
+
+**Request**: Empty body `{}`
+
+**Response**:
 ```json
-[
-  "session-uuid-string",
-  {
+{
+  "0": "session-uuid-string",
+  "1": {
     "pk_commitment": "hex-encoded-commitment",
     "zk_pok_commitment": "hex-encoded-proof"
   }
-]
-```
-
-Evidence: [`tests.rs:24-26`](../gotham-server/src/tests.rs#L24-L26)
-
-### Sign Second Message Request
-
-```rust
-pub struct SignSecondMsgRequest {
-    pub message: BigInt,              // Transaction hash to sign
-    pub party_two_sign_message: party2::SignMessage,
-    pub x_pos_child_key: BigInt,      // HD derivation x
-    pub y_pos_child_key: BigInt,      // HD derivation y
 }
 ```
 
-Evidence: [`gotham-client/src/ecdsa/sign.rs:20-26`](../gotham-client/src/ecdsa/sign.rs#L20-L26)
+| Field | Type | Description |
+|-------|------|-------------|
+| `0` | String | Session ID (UUID v4) for subsequent requests |
+| `1` | KeyGenFirstMsg | Party1's commitment message |
 
-### Signature Response
+Evidence: [`keygen.rs:40-41`](../gotham-client/src/ecdsa/keygen.rs#L40-L41)
 
-```rust
-pub struct SignatureRecid {
-    pub r: BigInt,     // ECDSA r component
-    pub s: BigInt,     // ECDSA s component  
-    pub recid: u8,     // Recovery ID (0-3)
+#### POST /ecdsa/keygen/{id}/second
+
+**Request**:
+```json
+{
+  "pk": "hex-public-key",
+  "pk_t_rand_commitment": "hex-commitment",
+  "challenge_response": "hex-proof"
 }
 ```
 
-Evidence: [`tests.rs:243-248`](../gotham-server/src/tests.rs#L243-L248)
+**Response**: `KeyGenParty1Message2` containing ECDH message and Paillier public key
+
+Evidence: [`keygen.rs:47-49`](../gotham-client/src/ecdsa/keygen.rs#L47-L49)
+
+#### POST /ecdsa/sign/{id}/first
+
+**Request**:
+```json
+{
+  "d_log_proof": "hex-proof",
+  "public_share": "hex-public-key"
+}
+```
+
+**Response**: `EphKeyGenFirstMsg` with Party1's ephemeral public key
+
+Evidence: [`sign.rs:40-44`](../gotham-client/src/ecdsa/sign.rs#L40-L44)
+
+#### POST /ecdsa/sign/{id}/second
+
+**Request**:
+```json
+{
+  "message": "hex-message-hash",
+  "party_two_sign_message": {
+    "partial_sig": {...}
+  },
+  "x_pos_child_key": "derivation-x",
+  "y_pos_child_key": "derivation-y"
+}
+```
+
+**Response**:
+```json
+{
+  "r": "hex-r-component",
+  "s": "hex-s-component",
+  "recid": 0
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `r` | BigInt (hex) | ECDSA signature r component |
+| `s` | BigInt (hex) | ECDSA signature s component |
+| `recid` | u8 | Recovery ID (0 or 1) |
+
+Evidence: [`sign.rs:76-93`](../gotham-client/src/ecdsa/sign.rs#L76-L93)
+
+### Error Responses
+
+| HTTP Code | Meaning | Response Body | Evidence |
+|-----------|---------|---------------|----------|
+| 400 | Bad Request | `"Bad request"` | [`server.rs:11-14`](../gotham-server/src/server.rs#L11-L14) |
+| 404 | Not Found | `"Unknown route '{uri}'"` | [`server.rs:16-19`](../gotham-server/src/server.rs#L16-L19) |
+| 500 | Internal Error | `"Internal server error"` | [`server.rs:6-9`](../gotham-server/src/server.rs#L6-L9) |
+
+### Content Types
+
+| Direction | Content-Type | Evidence |
+|-----------|--------------|----------|
+| Request | `application/json` | [`lib.rs:93`](../gotham-client/src/lib.rs#L93) |
+| Response | `application/json` | Rocket default |
+
+### Protocol Flow Example
+
+```bash
+# 1. Start keygen
+curl -X POST http://localhost:8000/ecdsa/keygen/first \
+  -H "Content-Type: application/json" \
+  -d '{}'
+# Returns: ["session-id", {...}]
+
+# 2. Continue with session ID
+curl -X POST http://localhost:8000/ecdsa/keygen/session-id/second \
+  -H "Content-Type: application/json" \
+  -d '{"pk": "...", "pk_t_rand_commitment": "...", "challenge_response": "..."}'
+
+# ... rounds 3-4, chaincode rounds ...
+
+# 3. Sign with established session
+curl -X POST http://localhost:8000/ecdsa/sign/session-id/first \
+  -H "Content-Type: application/json" \
+  -d '{"d_log_proof": "...", "public_share": "..."}'
+
+curl -X POST http://localhost:8000/ecdsa/sign/session-id/second \
+  -H "Content-Type: application/json" \
+  -d '{"message": "...", "party_two_sign_message": {...}, "x_pos_child_key": "0", "y_pos_child_key": "0"}'
+# Returns: {"r": "...", "s": "...", "recid": 0}
+```
 
 ---
 
-## Client Library API
+## Wire Format
 
-### ClientShim
+All messages use JSON serialization via `serde`:
 
-```rust
-pub struct ClientShim<C: Client> {
-    pub client: C,
-    pub auth_token: Option<String>,
-    pub endpoint: String,
-}
+| Aspect | Format | Evidence |
+|--------|--------|----------|
+| Serialization | JSON | [`Cargo.toml:12-13`](../Cargo.toml#L12-L13) |
+| BigInt encoding | Hex string | serde_json default |
+| Byte arrays | Hex string | serde_json default |
+| Structs | Object with named fields | serde derive |
 
-impl ClientShim<reqwest::Client> {
-    pub fn new(endpoint: String, auth_token: Option<String>) -> Self;
-}
+### Cryptographic Types
 
-impl<C: Client> ClientShim<C> {
-    pub fn post<V>(&self, path: &str) -> Option<V>;
-    pub fn postb<T, V>(&self, path: &str, body: T) -> Option<V>;
-}
-```
-
-Evidence: [`gotham-client/src/lib.rs:19-68`](../gotham-client/src/lib.rs#L19-L68)
-
-### Client Trait
-
-```rust
-pub trait Client: Sized {
-    fn post<V: DeserializeOwned, T: Serialize>(
-        &self,
-        endpoint: &str,
-        uri: &str,
-        bearer_token: Option<String>,
-        body: T,
-    ) -> Option<V>;
-}
-```
-
-Evidence: [`gotham-client/src/lib.rs:71-79`](../gotham-client/src/lib.rs#L71-L79)
-
-### ECDSA Module Public API
-
-```rust
-pub use keygen::get_master_key;
-pub use sign::sign;
-pub use types::PrivateShare;
-```
-
-Evidence: [`gotham-client/src/ecdsa/mod.rs:14-16`](../gotham-client/src/ecdsa/mod.rs#L14-L16)
-
----
-
-## Consumer Integration Guide
-
-### Installation
-
-```toml
-# Cargo.toml
-[dependencies]
-gotham-client = { path = "gotham-client" }
-# Or from Git:
-# gotham-client = { git = "https://github.com/ZenGo-X/gotham-city.git" }
-```
-
-### Quick Integration
-
-```rust
-use gotham_client::{ClientShim, ecdsa};
-use two_party_ecdsa::curv::BigInt;
-
-// 1. Create client pointing to Gotham server
-let client = ClientShim::new("http://localhost:8000".to_string(), None);
-
-// 2. Generate key shares
-let private_share = ecdsa::get_master_key(&client);
-
-// 3. Derive child key for specific address
-let x_pos = BigInt::from(0u32);
-let y_pos = BigInt::from(1u32);
-let child_key = private_share.master_key.get_child(vec![x_pos.clone(), y_pos.clone()]);
-
-// 4. Sign a message hash
-let message_hash = BigInt::from_hex("0x...");
-let signature = ecdsa::sign(&client, message_hash, &child_key, x_pos, y_pos, &private_share.id)?;
-
-println!("r: {}, s: {}, recid: {}", signature.r, signature.s, signature.recid);
-```
-
-Evidence: [`integration-tests/tests/ecdsa.rs:107-150`](../integration-tests/tests/ecdsa.rs#L107-L150)
-
-### Use Cases
-
-| Use Case | API | Example | Evidence |
-|----------|-----|---------|----------|
-| Create wallet | `ecdsa::get_master_key(&client)` | Key generation | [`keygen.rs:37`](../gotham-client/src/ecdsa/keygen.rs#L37) |
-| Derive address | `mk.get_child(vec![x, y])` | HD derivation | [`keygen.rs:108`](../gotham-client/src/ecdsa/keygen.rs#L108) |
-| Sign transaction | `ecdsa::sign(&client, msg, &mk, x, y, &id)` | Transaction signing | [`sign.rs:28`](../gotham-client/src/ecdsa/sign.rs#L28) |
-| Custom HTTP client | `ClientShim::new_with_client(...)` | Testing, mocking | [`lib.rs:38-44`](../gotham-client/src/lib.rs#L38-L44) |
-
-### Configuration Options
-
-| Option | Type | Default | Description | Evidence |
-|--------|------|---------|-------------|----------|
-| `endpoint` | String | Required | Gotham server URL | [`lib.rs:23`](../gotham-client/src/lib.rs#L23) |
-| `auth_token` | Option<String> | None | Bearer token for auth | [`lib.rs:22`](../gotham-client/src/lib.rs#L22) |
-
-### FFI Bindings
-
-For mobile integration (iOS/Android):
-
-| Platform | Function | Evidence |
-|----------|----------|----------|
-| iOS (C) | `get_client_master_key(endpoint, auth_token)` | [`keygen.rs:128-155`](../gotham-client/src/ecdsa/keygen.rs#L128-L155) |
-| iOS (C) | `sign_message(endpoint, auth_token, msg, mk, x, y, id)` | [`sign.rs:102-178`](../gotham-client/src/ecdsa/sign.rs#L102-L178) |
-| Android (JNI) | `Java_com_zengo_components_kms_gotham_ECDSA_getClientMasterKey` | [`keygen.rs:160-241`](../gotham-client/src/ecdsa/keygen.rs#L160-L241) |
-| Android (JNI) | `Java_com_zengo_components_kms_gotham_ECDSA_signMessage` | [`sign.rs:183-339`](../gotham-client/src/ecdsa/sign.rs#L183-L339) |
+| Type | JSON Representation |
+|------|---------------------|
+| `BigInt` | Hex-encoded string |
+| `GE` (Group Element) | Object with x, y coordinates |
+| `FE` (Field Element) | Hex-encoded scalar |
+| `EncryptedValue` | Object with ciphertext |

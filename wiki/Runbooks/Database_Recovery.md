@@ -1,117 +1,203 @@
-# Database Recovery
+# Runbook: Database Recovery
 
-**Severity**: P1  
-**Last Tested**: 2025-12-05  
-**Owner**: Platform Team
+## Header
+
+| Field | Value |
+|-------|-------|
+| Severity | P1 - Critical |
+| Owner | Infrastructure team |
+| Last Updated | 2025-12-06 |
+| Review Cycle | Quarterly |
+
+---
 
 ## Symptoms
 
-- Server fails to start with RocksDB errors
-- "Unable to open database" or corruption errors in logs
-- Key generation succeeds but signing fails (session not found)
-- Disk full alerts on server
+- Server fails to start with DB errors
+- RocksDB corruption messages in logs
+- Missing key shares (sessions exist but data lost)
+- "DB open failed" or "SST file corrupted" errors
+
+---
 
 ## Diagnosis
 
-| Step | Command/Action | Expected Output | Evidence |
-|------|----------------|-----------------|----------|
-| 1 | Check DB directory exists | Directory present | `ls -la ./db/` |
-| 2 | Check disk space | >10% free | `df -h .` |
-| 3 | Check file permissions | Read/write for server user | `ls -la ./db/` |
-| 4 | Check RocksDB integrity | No errors | `rocksdb_ldb --db=./db scan` |
-| 5 | Check recent backups | Backup files exist | `ls -la ./backups/` |
+### Step 1: Identify Corruption Type
 
-### RocksDB Error Patterns
+```bash
+# Check RocksDB logs
+cat /path/to/db/LOG | tail -100
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| "Corruption: block checksum mismatch" | Data corruption | Restore from backup |
-| "IO error: No space left on device" | Disk full | Free space, expand disk |
-| "IO error: Permission denied" | File permissions | Fix permissions |
-| "lock hold by current process" | Stale lock file | Remove LOCK file |
+# Look for:
+# - "Corruption" messages
+# - "SST file" errors
+# - "MANIFEST" errors
+```
+
+### Step 2: Verify Backup Availability
+
+```bash
+# Check backup location
+ls -la /path/to/backups/
+
+# Verify backup integrity
+ls -la /path/to/backups/db.backup.YYYYMMDD/
+```
+
+### Step 3: Assess Data Loss Scope
+
+```bash
+# Count keys in corrupted DB (if readable)
+# This requires RocksDB tools
+
+# Or check backup age
+stat /path/to/backups/db.backup.latest/
+
+# Determine sessions created since last backup
+# These will be lost in recovery
+```
+
+---
 
 ## Resolution
 
-### Option 1: Clear Stale Lock
-
-If server crashed and left a lock file:
-
-| Step | Action | Rollback | Evidence |
-|------|--------|----------|----------|
-| 1 | Stop any running server | N/A | `pkill -f gotham-server` |
-| 2 | Remove lock file | N/A | `rm ./db/LOCK` |
-| 3 | Restart server | N/A | `cargo run` |
-
-### Option 2: Restore from Backup
-
-| Step | Action | Rollback | Evidence |
-|------|--------|----------|----------|
-| 1 | Stop server | N/A | `pkill -f gotham-server` |
-| 2 | Move corrupted DB | Keep for analysis | `mv ./db ./db.corrupted.$(date +%Y%m%d)` |
-| 3 | Restore from backup | N/A | `cp -r ./backups/latest ./db` |
-| 4 | Start server | N/A | `cargo run` |
-| 5 | Verify operation | Test keygen/sign | Integration test |
-
-### Option 3: Full Reset (Data Loss)
-
-**⚠️ WARNING**: This destroys all key shares. Users will lose access to funds.
-
-| Step | Action | Rollback | Evidence |
-|------|--------|----------|----------|
-| 1 | Stop server | N/A | `pkill -f gotham-server` |
-| 2 | Archive corrupted DB | N/A | `mv ./db ./db.archived.$(date +%Y%m%d)` |
-| 3 | Start fresh | N/A | `cargo run` (creates new DB) |
-| 4 | Notify affected users | N/A | Communication plan |
-
-### Disk Space Recovery
+### Option 1: Repair In-Place (Minor Corruption)
 
 ```bash
-# 1. Check disk usage
-du -sh ./db/
+# Stop server
+sudo systemctl stop gotham-server
 
-# 2. If DB is large, consider compaction
-# (Requires RocksDB tools)
-rocksdb_ldb --db=./db compact
+# Backup current state
+cp -r db/ db.corrupted.$(date +%Y%m%d)
 
-# 3. Archive old backups
-find ./backups -mtime +30 -delete
+# Attempt repair with RocksDB tools
+ldb repair --db=db/
+
+# Restart server
+sudo systemctl start gotham-server
+
+# Verify functionality
+curl http://localhost:8000/ecdsa/keygen/first -d '{}'
 ```
 
-## Backup Procedure
+### Option 2: Restore from Backup (Major Corruption)
 
-Implement regular backups:
+```bash
+# Stop server
+sudo systemctl stop gotham-server
+
+# Backup corrupted DB for analysis
+mv db/ db.corrupted.$(date +%Y%m%d)
+
+# Restore from backup
+cp -r /path/to/backups/db.backup.latest/ db/
+
+# Restart server
+sudo systemctl start gotham-server
+
+# Verify functionality
+curl http://localhost:8000/ecdsa/keygen/first -d '{}'
+```
+
+### Option 3: Fresh Start (Complete Loss)
+
+⚠️ **WARNING**: This destroys all existing key shares. Users will need to re-keygen.
+
+```bash
+# Stop server
+sudo systemctl stop gotham-server
+
+# Archive corrupted DB
+mv db/ db.corrupted.$(date +%Y%m%d)
+
+# Server will create new DB on start
+sudo systemctl start gotham-server
+
+# Notify affected users
+# They must generate new keys
+```
+
+---
+
+## Backup Procedures
+
+### Manual Backup
+
+```bash
+# Stop server for consistent backup
+sudo systemctl stop gotham-server
+
+# Create backup
+cp -r db/ /path/to/backups/db.backup.$(date +%Y%m%d)
+
+# Restart server
+sudo systemctl start gotham-server
+```
+
+### Automated Backup Script
 
 ```bash
 #!/bin/bash
-# backup_db.sh - Run daily via cron
+# /opt/gotham/backup.sh
 
-BACKUP_DIR="/backups/gotham"
-DB_DIR="./db"
-DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="/path/to/backups"
+DB_DIR="/path/to/gotham-server/db"
+RETENTION_DAYS=30
 
-# Create backup
-cp -r "$DB_DIR" "$BACKUP_DIR/db_$DATE"
+# Create backup (server running - may have slight inconsistency)
+cp -r $DB_DIR $BACKUP_DIR/db.backup.$(date +%Y%m%d_%H%M%S)
 
-# Keep only last 7 days
-find "$BACKUP_DIR" -type d -mtime +7 -exec rm -rf {} +
+# Or use RocksDB checkpoint for online backup
+# ldb checkpoint --db=$DB_DIR --checkpoint_dir=$BACKUP_DIR/checkpoint.$(date +%Y%m%d)
 
-# Create symlink to latest
-ln -sfn "$BACKUP_DIR/db_$DATE" "$BACKUP_DIR/latest"
+# Clean old backups
+find $BACKUP_DIR -name "db.backup.*" -mtime +$RETENTION_DAYS -exec rm -rf {} \;
 ```
+
+### Cron Schedule
+
+```bash
+# Daily backup at 2 AM
+0 2 * * * /opt/gotham/backup.sh >> /var/log/gotham-backup.log 2>&1
+```
+
+---
+
+## Prevention
+
+### Monitoring
+
+- [ ] Monitor disk space usage
+- [ ] Alert on DB size growth anomalies
+- [ ] Monitor for RocksDB error patterns in logs
+- [ ] Verify backup completion daily
+
+### Best Practices
+
+- [ ] Regular backup schedule (daily minimum)
+- [ ] Test backup restoration quarterly
+- [ ] Use RAID or replicated storage
+- [ ] Encrypt backups at rest
+- [ ] Store backups in separate location/region
+
+---
 
 ## Escalation
 
 | Condition | Escalate To | Contact |
-|-----------|-------------|----------|
-| Backup restoration fails | Database Admin | #db-oncall |
-| Data corruption cause unknown | Engineering Lead | #eng-oncall |
-| User funds affected | Executive + Legal | #incident-response |
+|-----------|-------------|---------|
+| No viable backup | Security team + Engineering lead | #incident-response |
+| Data loss affects production | Incident commander | #incident-response |
+| Corruption cause unclear | Database specialist | #data-team |
+
+---
 
 ## Post-Incident
 
-- [ ] Document root cause (disk failure, corruption, etc.)
-- [ ] Verify backup system is functioning
-- [ ] Add disk space monitoring alert
-- [ ] Consider redundant storage (RAID, cloud backup)
-- [ ] Review RocksDB configuration for durability
-- [ ] Schedule retrospective if data loss occurred
+1. [ ] Document root cause (disk failure, software bug, etc.)
+2. [ ] Identify affected sessions/users
+3. [ ] Communicate data loss to affected users
+4. [ ] Review and improve backup procedures
+5. [ ] Implement additional monitoring
+6. [ ] Schedule post-mortem meeting
+7. [ ] Update this runbook with lessons learned

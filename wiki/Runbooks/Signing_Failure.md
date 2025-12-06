@@ -1,89 +1,171 @@
-# Signing Failure
+# Runbook: Signing Failure
 
-**Severity**: P1  
-**Last Tested**: 2025-12-05  
-**Owner**: Platform Team
+## Header
+
+| Field | Value |
+|-------|-------|
+| Severity | P1 - Critical |
+| Owner | On-call engineer |
+| Last Updated | 2025-12-06 |
+| Review Cycle | Quarterly |
+
+---
 
 ## Symptoms
 
-- Client receives "party1 sign first message request failed" or "party1 sign second message request failed"
-- HTTP 400 response on `/ecdsa/sign/{id}/*` endpoints
-- Transactions fail to sign, blocking user operations
-- Sign latency exceeds 500ms consistently
+- Client receives `None` response from sign API calls
+- HTTP 400 error: "Key not found" or "Invalid session"
+- HTTP 500 error during signing
+- Transaction fails to broadcast despite successful sign call
+- Invalid signature (wrong r, s, or recid values)
+
+---
 
 ## Diagnosis
 
-| Step | Command/Action | Expected Output | Evidence |
-|------|----------------|-----------------|----------|
-| 1 | Verify session ID exists | Key share in DB | Check server logs for "Getting from db" |
-| 2 | Verify keygen completed | PrivateShare has valid `id` field | Client wallet file inspection |
-| 3 | Check server connectivity | HTTP response | `curl -X POST http://localhost:8000/ecdsa/sign/test/first` |
-| 4 | Check client wallet file | Valid JSON, non-empty master_key | `cat wallet.json \| jq .` |
-| 5 | Verify HD derivation params | x_pos, y_pos are valid integers | Client logs |
+### Step 1: Verify Session ID Exists
 
-### Error Pattern Analysis
+```bash
+# Check if session exists on server
+# (Requires DB access - implementation specific)
 
-| Error Message | Cause | Solution |
-|---------------|-------|----------|
-| "party1 sign first message request failed" | Session not found or server error | Re-keygen or check server |
-| "party1 sign second message request failed" | Invalid signature computation | Check message hash format |
-| HTTP 400 | Malformed request body | Verify JSON serialization |
-| HTTP 404 | Invalid session ID | Use ID from keygen |
+# For RocksDB: check if keys with session prefix exist
+ls -la /path/to/db/
+
+# Look for files containing session ID patterns
+```
+
+### Step 2: Verify Server Health
+
+```bash
+# Test sign endpoint with known good session
+curl -X POST http://localhost:8000/ecdsa/sign/{session_id}/first \
+  -H "Content-Type: application/json" \
+  -d '{"d_log_proof": "...", "public_share": "..."}'
+
+# Expected: JSON response
+# Error 400: Session not found
+# Error 500: Server error
+```
+
+### Step 3: Check Authorization
+
+```bash
+# Verify auth token (if implemented)
+# Check Db::granted() implementation
+
+# Default implementation always returns true
+# Custom implementations may reject
+```
+
+### Step 4: Validate Input Data
+
+| Field | Validation | Common Issues |
+|-------|------------|---------------|
+| `message` | Valid hex-encoded BigInt | Wrong encoding, empty |
+| `x_pos_child_key` | Valid BigInt | Out of range |
+| `y_pos_child_key` | Valid BigInt | Out of range |
+| `party_two_sign_message` | Valid JSON structure | Corrupted client state |
+
+### Step 5: Check Signature Output
+
+```bash
+# Verify signature format
+# r: 32-byte hex
+# s: 32-byte hex  
+# recid: 0 or 1
+
+# If values look wrong, check:
+# - Message hash computation
+# - HD derivation indices
+# - Client master key integrity
+```
+
+---
 
 ## Resolution
 
-| Step | Action | Rollback | Evidence |
-|------|--------|----------|----------|
-| 1 | Verify session ID matches keygen | N/A | Compare `private_share.id` |
-| 2 | Retry signing operation | N/A | Client retry |
-| 3 | Re-keygen if session lost | Creates new wallet | [`keygen.rs:37`](../../gotham-client/src/ecdsa/keygen.rs#L37) |
-| 4 | Check server DB for session | N/A | DB inspection |
+### Session Not Found
 
-### Session Recovery
+**Cause**: Key share was deleted, server restarted with new DB, or wrong session ID
 
-If server was restarted and DB was lost:
+**Resolution**:
+1. Verify session ID is correct (from keygen output)
+2. If key share lost, user must re-keygen
+3. Restore from backup if available
 
 ```bash
-# Client must re-generate keys
-# WARNING: This creates a NEW wallet address
-
-# 1. Backup old wallet
-cp wallet.json wallet.json.old
-
-# 2. Re-run keygen
-# (Application-specific command)
+# If backup exists
+cp -r db.backup/ db/
+sudo systemctl restart gotham-server
 ```
 
-**Important**: Re-keygen creates a new key pair. Funds at old addresses require the old key share.
+### Authorization Rejected
 
-### Message Hash Verification
+**Cause**: Custom `granted()` implementation rejected the request
 
-For Bitcoin signing:
+**Resolution**:
+1. Check authorization policy
+2. Verify customer ID matches
+3. Check rate limits
+4. Review auth token validity
 
-```rust
-// Ensure message is the sighash, not raw transaction
-let sig_hash = SigHashCache::new(&transaction).signature_hash(
-    idx,
-    script_code,
-    value,
-    SigHashType::All,
-);
-let message = BigInt::from(&sig_hash[..]);
-```
+### Invalid Signature
 
-Evidence: [`bitcoin/mod.rs:336-346`](../../demo-wallet/src/bitcoin/mod.rs#L336-L346)
+**Cause**: Wrong message hash, wrong HD indices, or protocol error
+
+**Resolution**:
+1. Verify message hash computation:
+   - Bitcoin: BIP143 sighash
+   - Ethereum: Keccak256 with EIP-155
+2. Verify HD derivation indices match address
+3. Check master key integrity (re-load from storage)
+
+### Server Error During Signing
+
+**Resolution**:
+1. Check server logs for panic/error details
+2. Verify DB accessibility
+3. Check memory/CPU resources
+4. Restart server if needed
+
+---
+
+## Transaction-Specific Issues
+
+### Bitcoin Transaction Fails
+
+| Issue | Cause | Resolution |
+|-------|-------|------------|
+| Invalid signature | Wrong sighash type | Use SIGHASH_ALL |
+| Insufficient funds | UTXO changed | Refresh UTXOs |
+| Dust output | Amount too small | Increase output amount |
+
+### Ethereum Transaction Fails
+
+| Issue | Cause | Resolution |
+|-------|-------|------------|
+| Invalid v value | Wrong chain ID | Verify EIP-155 encoding |
+| Nonce too low | Concurrent tx | Get fresh nonce |
+| Insufficient gas | Gas limit too low | Increase gas limit |
+
+---
 
 ## Escalation
 
 | Condition | Escalate To | Contact |
-|-----------|-------------|----------|
-| All signing operations failing | Engineering Lead | #eng-oncall |
-| Session data missing from DB | Database Admin | #db-oncall |
-| Invalid signatures produced | Security Team | #security |
+|-----------|-------------|---------|
+| Key shares missing | Security team | security@company.com |
+| Persistent failures | Engineering lead | #eng-leads |
+| Funds at risk | Incident commander | #incident-response |
+
+---
 
 ## Post-Incident
 
-- [ ] Document root cause in incident report
-- [ ] Add session existence check before signing
-- [ ] Consider session ID validation in client
-- [ ] Schedule retrospective if user funds affected
+1. [ ] Document root cause
+2. [ ] Verify no funds were lost
+3. [ ] Check for duplicate signing attempts
+4. [ ] Review affected transactions on blockchain
+5. [ ] Update client-side error handling if applicable
+6. [ ] Communicate resolution to affected users
