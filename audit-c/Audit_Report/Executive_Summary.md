@@ -8,7 +8,7 @@
 | **Tier** | FULL |
 | **Audit Scope** | ALL (Security + Code Quality) |
 | **Coverage Mode** | COMPREHENSIVE (target **not achieved** – _"Comprehensive coverage incomplete"_) |
-| **Analyzed Revision (SHA)** | {SHA_TBD} |
+| **Analyzed Revision (SHA)** | 81e1110fe95fdd3efd60dace2793e4549f3dfd2c |
 | **Scope Base SHA** (SPECIFIED+change-based only) | N/A |
 | **Scope Head SHA** (SPECIFIED+change-based only) | N/A |
 | **Working Tree Status** | Dirty (uncommitted changes present) |

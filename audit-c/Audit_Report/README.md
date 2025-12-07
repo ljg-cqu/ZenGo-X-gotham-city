@@ -8,7 +8,7 @@
 | **Audit Scope** | ALL (Security + Code Quality) |
 | **Coverage Mode** | COMPREHENSIVE (target **not achieved** – _"Comprehensive coverage incomplete"_) |
 | **Status** | ⚠️ CRITICAL ISSUES IDENTIFIED – DO NOT USE DEFAULT CONFIGURATION IN PRODUCTION |
-| **Analyzed Revision (SHA)** | {SHA_TBD} |
+| **Analyzed Revision (SHA)** | 81e1110fe95fdd3efd60dace2793e4549f3dfd2c |
 | **Working Tree Status** | Dirty (uncommitted changes present) |
 | **Tech Stack** | Rust, Rocket 0.5.0-rc.1, RocksDB, secp256k1, two-party-ecdsa, ethers, electrumx-client |
 
