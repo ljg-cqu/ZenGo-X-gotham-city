@@ -28,7 +28,7 @@ Because coverage is incomplete, these findings should be treated as **additive**
 | Attribute | Value |
 |-----------|-------|
 | **Severity** | LOW |
-| **Location** | [`gotham-server/Rocket.toml:1-5`](../gotham-server/Rocket.toml#L1-L5) |
+| **Location** | [`gotham-server/Rocket.toml:1-5`](../../gotham-server/Rocket.toml#L1-L5) |
 
 **Issue**
 
@@ -53,7 +53,7 @@ For development and isolated test environments, binding to `0.0.0.0` is common. 
 | Attribute | Value |
 |-----------|-------|
 | **Severity** | INFO |
-| **Location** | [`gotham-server/src/public_gotham.rs:92-95`](../gotham-server/src/public_gotham.rs#L92-L95) |
+| **Location** | [`gotham-server/src/public_gotham.rs:92-95`](../../gotham-server/src/public_gotham.rs#L92-L95) |
 
 **Issue**
 
@@ -87,7 +87,7 @@ fn granted(&self, message: &str, customer_id: &str) -> Result<bool, DatabaseErro
 | Attribute | Value |
 |-----------|-------|
 | **Severity** | LOW |
-| **Location** | [`gotham-server/src/public_gotham.rs:14-16`](../gotham-server/src/public_gotham.rs#L14-L16), [`gotham-server/src/public_gotham.rs:35-43`](../gotham-server/src/public_gotham.rs#L35-L43), [`gotham-server/src/public_gotham.rs:58-79`](../gotham-server/src/public_gotham.rs#L58-L79) |
+| **Location** | [`gotham-server/src/public_gotham.rs:14-16`](../../gotham-server/src/public_gotham.rs#L14-L16), [`gotham-server/src/public_gotham.rs:35-43`](../../gotham-server/src/public_gotham.rs#L35-L43), [`gotham-server/src/public_gotham.rs:58-79`](../../gotham-server/src/public_gotham.rs#L58-L79) |
 
 **Issue**
 
